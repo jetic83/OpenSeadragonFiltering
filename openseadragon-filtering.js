@@ -268,12 +268,36 @@
                 callback();
             };
         },
+        THRESHOLDING_BACKGROUND: function (threshold, inverse) {
+            if (threshold < 0 || threshold > 765) {
+                throw new Error('Threshold must be between 0 and 765.');
+            }
+            if (typeof (inverse) === "undefined") {
+                inverse = false;
+            }
+            return function (context, callback) {
+                var imgData = context.getImageData(
+                    0, 0, context.canvas.width, context.canvas.height);
+                var pixels = imgData.data;
+                for (var i = 0; i < pixels.length; i += 4) {
+                    var r = pixels[i];
+                    var g = pixels[i + 1];
+                    var b = pixels[i + 2];
+                    var v = r + g + b;
+                    if (!inverse && v < threshold || inverse && v > threshold) {
+                        pixels[i] = pixels[i + 1] = pixels[i + 2] = 0;
+                    }
+                }
+                context.putImageData(imgData, 0, 0);
+                callback();
+            };
+        },
         BRIGHTNESS: function(adjustment) {
             if (adjustment < -255 || adjustment > 255) {
                 throw new Error(
                     'Brightness adjustment must be between -255 and 255.');
             }
-            var precomputedBrightness = []
+            var precomputedBrightness = [];
             for (var i = 0; i < 256; i++) {
                 precomputedBrightness[i] = i + adjustment;
             }
@@ -294,7 +318,7 @@
             if (adjustment < 0) {
                 throw new Error('Contrast adjustment must be positive.');
             }
-            var precomputedContrast = []
+            var precomputedContrast = [];
             for (var i = 0; i < 256; i++) {
                 precomputedContrast[i] = i * adjustment;
             }
@@ -315,7 +339,7 @@
             if (adjustment < 0) {
                 throw new Error('Gamma adjustment must be positive.');
             }
-            var precomputedGamma = []
+            var precomputedGamma = [];
             for (var i = 0; i < 256; i++) {
                 precomputedGamma[i] = Math.pow(i / 255, adjustment) * 255;
             }
@@ -337,8 +361,9 @@
                 var imgData = context.getImageData(
                     0, 0, context.canvas.width, context.canvas.height);
                 var pixels = imgData.data;
+                var val;
                 for (var i = 0; i < pixels.length; i += 4) {
-                    var val = (pixels[i] + pixels[i + 1] + pixels[i + 2]) / 3;
+                    val = (pixels[i] + pixels[i + 1] + pixels[i + 2]) / 3;
                     pixels[i] = val;
                     pixels[i + 1] = val;
                     pixels[i + 2] = val;
@@ -348,7 +373,7 @@
             };
         },
         INVERT: function () {
-            var precomputedInvert = []
+            var precomputedInvert = [];
             for (var i = 0; i < 256; i++) {
                 precomputedInvert[i] = 255 - i;
             }
@@ -432,26 +457,33 @@
                     .data;
                 var offset;
 
-                for (var y = 0; y < height; y++) {
-                    for (var x = 0; x < width; x++) {
-                        var r = 0;
-                        var g = 0;
-                        var b = 0;
-                        for (var j = 0; j < kernelSize; j++) {
-                            for (var i = 0; i < kernelSize; i++) {
-                                var pixelX = x + i - kernelHalfSize;
-                                var pixelY = y + j - kernelHalfSize;
-                                if (pixelX >= 0 && pixelX < width &&
-                                    pixelY >= 0 && pixelY < height) {
-                                    offset = (pixelY * width + pixelX) * 4;
-                                    var weight = kernel[j * kernelSize + i];
-                                    r += originalPixels[offset] * weight;
-                                    g += originalPixels[offset + 1] * weight;
-                                    b += originalPixels[offset + 2] * weight;
+                var x, y, i, j, r, g, b, pixelX, pixelY, weight, xadj, yadj, y_width, pixelY_width, j_kernelSize;
+                for (y = 0; y < height; y++) {
+                    yadj = y - kernelHalfSize;
+                    y_width = y * width;
+                    for (x = 0; x < width; x++) {
+                        r = 0;
+                        g = 0;
+                        b = 0;
+                        xadj = x - kernelHalfSize;
+                        for (j = 0; j < kernelSize; j++) {
+                            pixelY = j + yadj;
+                            if (pixelY >= 0 && pixelY < height) {
+                                pixelY_width = pixelY * width;
+                                j_kernelSize = j * kernelSize;
+                                for (i = 0; i < kernelSize; i++) {
+                                    pixelX = i + xadj;
+                                    if (pixelX >= 0 && pixelX < width) {
+                                        offset = (pixelY_width + pixelX) * 4;
+                                        weight = kernel[j_kernelSize + i];
+                                        r += originalPixels[offset] * weight;
+                                        g += originalPixels[offset + 1] * weight;
+                                        b += originalPixels[offset + 2] * weight;
+                                    }
                                 }
                             }
                         }
-                        offset = (y * width + x) * 4;
+                        offset = (y_width + x) * 4;
                         imgData.data[offset] = r;
                         imgData.data[offset + 1] = g;
                         imgData.data[offset + 2] = b;
@@ -460,6 +492,81 @@
                 context.putImageData(imgData, 0, 0);
                 callback();
             };
+        },
+        SHARPEN: function (mix) {
+            if (mix < 0 || mix > 1) {
+                throw new Error('The mix weigth must be between 0 and 1.');
+            }
+            var x, y, r, g, b, dstOff, srcOff,
+                mix_rec = 1 - mix;
+
+            return function (context, callback) {
+                if (mix > 0) {
+                    var w = context.canvas.width,
+                        h = context.canvas.height,
+                        dstData = context.createImageData(w, h),
+                        dstBuff = dstData.data,
+                        srcBuff = context.getImageData(0, 0, w, h).data,
+                        srcOff_neighbour;
+                    y = h;
+                    while (y--) {
+                        x = w;
+                        while (x--) {
+                            dstOff = (y * w + x) * 4;
+
+                            // pixel itself times 5
+                            srcOff = dstOff;
+                            r = srcBuff[srcOff] * 5;
+                            g = srcBuff[srcOff + 1] * 5;
+                            b = srcBuff[srcOff + 2] * 5;
+
+                            // direct neighbors times -1
+                            if (x > 0) {
+                                srcOff_neighbour = srcOff - 4;
+                            } else {
+                                srcOff_neighbour = srcOff;
+                            }  
+                            r -= srcBuff[srcOff_neighbour];
+                            g -= srcBuff[srcOff_neighbour + 1];
+                            b -= srcBuff[srcOff_neighbour + 2];
+
+                            if (x < w - 1) {
+                                srcOff_neighbour = srcOff + 4;
+                            } else {
+                                srcOff_neighbour = srcOff;
+                            }
+                            r -= srcBuff[srcOff_neighbour];
+                            g -= srcBuff[srcOff_neighbour + 1];
+                            b -= srcBuff[srcOff_neighbour + 2];
+
+                            if (y > 0) {
+                                srcOff_neighbour = srcOff - 4 * w;
+                            } else {
+                                srcOff_neighbour = srcOff;
+                            }
+                            r -= srcBuff[srcOff_neighbour];
+                            g -= srcBuff[srcOff_neighbour + 1];
+                            b -= srcBuff[srcOff_neighbour + 2];
+
+                            if (y < h-1) {
+                                srcOff_neighbour = srcOff + 4 * w;
+                            } else {
+                                srcOff_neighbour = srcOff;
+                            }
+                            r -= srcBuff[srcOff_neighbour];
+                            g -= srcBuff[srcOff_neighbour + 1];
+                            b -= srcBuff[srcOff_neighbour + 2];
+
+                            dstBuff[dstOff] = r * mix + srcBuff[dstOff] * mix_rec;
+                            dstBuff[dstOff + 1] = g * mix + srcBuff[dstOff + 1] * mix_rec;
+                            dstBuff[dstOff + 2] = b * mix + srcBuff[dstOff + 2] * mix_rec;
+                            dstBuff[dstOff + 3] = 255;
+                        }
+                    }
+                    context.putImageData(dstData, 0, 0);
+                    callback();
+                }
+            }
         }
     };
 
